@@ -1,0 +1,135 @@
+# Development stack — docker compose up
+# สำหรับ production ดู docs/05-infrastructure.md
+
+services:
+  mongo:
+    image: mongo:7
+    command: mongod --replSet rs0 --bind_ip_all
+    ports: ["27017:27017"]
+    volumes: [mongo_data:/data/db]
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # init replica set ครั้งเดียว (จำเป็นสำหรับ transaction + change stream)
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo: { condition: service_healthy }
+    entrypoint: >
+      mongosh --host mongo:27017 --quiet --eval
+      "try { rs.status() } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }"
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes --appendfsync everysec
+      --maxmemory 512mb
+      --maxmemory-policy noeviction
+    ports: ["6379:6379"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build: .
+    # ★ --timeout-graceful-shutdown จำเป็นตั้งแต่มี SSE (/me/stream)
+    #   ไม่งั้นตอน --reload จะค้างที่ "Waiting for connections to close" ตลอดกาล
+    #   เพราะ SSE เป็น connection ที่ไม่มีวันปิดเอง → api ค้าง unhealthy ทั้งที่โค้ดแก้แล้ว
+    command: >
+      uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      --timeout-graceful-shutdown 3
+    ports: ["8000:8000"]
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017/egoke2026?replicaSet=rs0&directConnection=true
+      REDIS_URL: redis://redis:6379/0
+    # tests/ ต้อง mount ด้วย ไม่งั้น `docker compose exec api pytest` หาไฟล์ไม่เจอ
+    # (Dockerfile COPY แค่ app/ กับ scripts/ — เจตนา ไม่เอา test ขึ้น production image)
+    volumes:
+      - "./app:/app/app"
+      - "./scripts:/app/scripts"
+      - "./tests:/app/tests"
+      - "./pytest.ini:/app/pytest.ini"
+      # ★ read-only — tests/test_api_contracts.py อ่าน api.ts เพื่อเทียบ "สัญญา"
+      #   ระหว่างสองฝั่ง (ชื่อคีย์ / enum) ถ้าไม่ mount เทสต์ชุดนั้นจะ skip
+      - "../frontend/src:/frontend_src:ro"
+      # ★ read-only — tests/test_deploy_config.py ตรวจ config ของ production
+      #   (port ฐานข้อมูลปิดอยู่ไหม / มีรหัสผ่านไหม / nginx กลืน security header ไหม)
+      #   ไฟล์พวกนี้ไม่มีผลตอนรัน dev แต่ถ้าไม่ mount เทสต์ชุดนั้นจะ skip เงียบๆ
+      #
+      # ★ ต้อง mount "ทั้งโฟลเดอร์" ห้าม mount ทีละไฟล์
+      #   bind mount ของไฟล์เดี่ยวผูกกับ inode ตอนสร้าง container — พอแก้ไฟล์บน host
+      #   ด้วยวิธีที่เขียนไฟล์ใหม่ทับ (ซึ่ง editor ส่วนใหญ่ทำแบบนั้น) container
+      #   จะยังเห็นของเดิมหรือเห็นไฟล์ที่ถูกตัดกลางคัน
+      #   เคยเจอมาแล้ว: เทสต์อ่าน .gitignore ได้แค่ 1,636 ไบต์แรกแล้ว UnicodeDecodeError
+      - "../:/repo:ro"
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  ws:
+    build: .
+    command: uvicorn app.ws_main:app --host 0.0.0.0 --port 8001
+    ports: ["8001:8001"]
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      MONGO_URI: mongodb://mongo:27017/egoke2026?replicaSet=rs0&directConnection=true
+    volumes: ["./app:/app/app"]
+    # ★ override HEALTHCHECK จาก Dockerfile — ตัวนั้น curl :8000 ซึ่ง ws ฟังที่ :8001
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: python -m app.workers.runner
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017/egoke2026?replicaSet=rs0&directConnection=true
+      REDIS_URL: redis://redis:6379/0
+    volumes: ["./app:/app/app"]
+    # ★ ไม่มี HTTP server ให้ curl — ปิด healthcheck ที่สืบทอดมาจาก Dockerfile
+    #   ไม่งั้นขึ้น (unhealthy) ตลอด แล้ว health จริงๆ ของระบบดูไม่ออก
+    healthcheck:
+      disable: true
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  broadcaster:
+    build: .
+    command: python -m app.workers.broadcaster
+    env_file: .env
+    environment:
+      MONGO_URI: mongodb://mongo:27017/egoke2026?replicaSet=rs0&directConnection=true
+      REDIS_URL: redis://redis:6379/0
+    volumes: ["./app:/app/app"]
+    healthcheck:
+      disable: true
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  redis_data:

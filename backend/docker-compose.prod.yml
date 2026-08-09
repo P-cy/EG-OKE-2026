@@ -1,0 +1,223 @@
+# Production stack — VPS เครื่องเดียวจบ
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d
+#
+# ต่างจาก docker-compose.yml (dev) ตรงไหน — 4 ข้อ ทุกข้อเป็นเรื่องความปลอดภัย:
+#
+#   1. ★ mongo / redis / api / ws ไม่มี `ports:` เลย
+#      dev เปิด 27017 กับ 6379 ออก 0.0.0.0 ซึ่งบนเครื่องตัวเองไม่เป็นไร
+#      แต่บน VPS ที่มี public IP = ใครก็ต่อฐานข้อมูลได้ตรงๆ จากอินเทอร์เน็ต
+#      (mongo ที่เปิดทิ้งไว้โดนสแกนเจอภายในไม่กี่ชั่วโมง — เป็น bot กวาดทั้ง IPv4)
+#      ที่นี่ nginx เป็นทางเข้าเดียว มีแค่ 80/443 ที่โผล่ออกนอกเครื่อง
+#
+#   2. mongo เปิด access control (--keyFile ทำให้ --auth ติดมาด้วย)
+#      redis ตั้ง requirepass
+#      → ต่อให้ port หลุดออกไป ก็ยังต้องมีรหัสผ่าน
+#
+#   3. ไม่ mount โค้ดจาก host และไม่มี --reload
+#      dev mount ./app เข้าไปเพื่อแก้โค้ดแล้วเห็นผลทันที prod ใช้ image ที่ build แล้ว
+#      (แก้ไฟล์บน VPS แล้วโค้ดเปลี่ยนเองไม่ได้ = ตั้งใจ)
+#
+#   4. gunicorn 4 worker แทน uvicorn --reload ตัวเดียว
+#
+# ก่อนรันครั้งแรกต้องรัน  ./scripts/deploy-init.sh  ก่อน — มันสร้าง secret ทั้งหมด
+# กับ mongo keyfile ให้ (keyfile ต้อง chmod 400 + เจ้าของถูกตัว ไม่งั้น mongo ไม่บูต)
+
+name: egoke2026
+
+x-app-env: &app-env
+  MONGO_URI: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@mongo:27017/${MONGO_DB}?replicaSet=rs0&directConnection=true&authSource=admin
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+
+services:
+  mongo:
+    image: mongo:7
+    # ★ --keyFile เปิด internal auth ของ replica set และ "เปิด --auth ให้อัตโนมัติ"
+    #   replica set + access control ต้องมาคู่กันเสมอ ใส่แค่ --auth เฉยๆ mongo ไม่ยอมบูต
+    # ★ --wiredTigerCacheSizeGB จำกัดแรมที่ mongo กิน — ค่า default คือ (RAM-1)/2
+    #   บน VPS 4GB ที่รันทุกอย่างรวมกัน ปล่อย default แล้ว mongo จะกินจนตัวอื่นโดน OOM kill
+    command: >
+      mongod --replSet rs0 --bind_ip_all
+      --keyFile /etc/mongo/keyfile
+      --wiredTigerCacheSizeGB ${MONGO_CACHE_GB:-1}
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    volumes:
+      - mongo_data:/data/db
+      - ./secrets/mongo-keyfile:/etc/mongo/keyfile:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "-u", "${MONGO_ROOT_USER}",
+             "-p", "${MONGO_ROOT_PASSWORD}", "--authenticationDatabase", "admin",
+             "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+  # init replica set ครั้งเดียว — ต้อง login ก่อน (localhost exception ใช้ไม่ได้แล้ว
+  # เพราะ root user ถูกสร้างไปตอน initdb) และต้องประกาศ host เป็น "mongo:27017"
+  # ไม่ใช่ hostname ของ container ไม่งั้น service อื่นต่อไม่ติด
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo: { condition: service_healthy }
+    entrypoint:
+      - mongosh
+      - --host
+      - mongo:27017
+      - -u
+      - ${MONGO_ROOT_USER}
+      - -p
+      - ${MONGO_ROOT_PASSWORD}
+      - --authenticationDatabase
+      - admin
+      - --quiet
+      - --eval
+      - "try { rs.status().ok } catch(e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}) }"
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    # ★ noeviction ไม่ใช่ของฟุ่มเฟือย — redis ที่นี่ถือคะแนนโหวตจริง
+    #   ถ้าเป็น allkeys-lru พอแรมใกล้เต็มมันจะลบ key ทิ้งเงียบๆ = คะแนนหาย
+    #   noeviction แปลว่า "เต็มแล้วปฏิเสธการเขียน" ซึ่งดังพอให้รู้ตัว
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes --appendfsync everysec
+      --maxmemory ${REDIS_MAXMEMORY:-512mb}
+      --maxmemory-policy noeviction
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+    image: egoke-api:latest
+    env_file: .env.production
+    environment: *app-env
+    depends_on:
+      mongo: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  ws:
+    image: egoke-api:latest
+    command: >
+      gunicorn app.ws_main:app -k uvicorn.workers.UvicornWorker
+      -w 2 --bind 0.0.0.0:8001 --graceful-timeout 20 --access-logfile -
+    env_file: .env.production
+    environment: *app-env
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8001/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      api: { condition: service_started }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  worker:
+    image: egoke-api:latest
+    command: python -m app.workers.runner
+    env_file: .env.production
+    environment: *app-env
+    healthcheck: { disable: true }
+    depends_on:
+      api: { condition: service_started }
+    restart: unless-stopped
+
+  broadcaster:
+    image: egoke-api:latest
+    command: python -m app.workers.broadcaster
+    env_file: .env.production
+    environment: *app-env
+    healthcheck: { disable: true }
+    depends_on:
+      api: { condition: service_started }
+    restart: unless-stopped
+
+  # ── หน้าเว็บ (Next.js) ─────────────────────────────────────────────
+  # ★ เปิดด้วย profile "web" เท่านั้น:  docker compose --profile web up -d
+  #   ถ้าเอา frontend ไปไว้ Vercel ก็ไม่ต้องเปิดตัวนี้
+  #   NEXT_PUBLIC_API_BASE ถูกฝังตอน build ไม่ใช่ตอนรัน — เปลี่ยนโดเมนต้อง build ใหม่
+  web:
+    profiles: ["web"]
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_API_BASE: https://${API_DOMAIN}/v1
+    image: egoke-web:latest
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── ทางเข้าเดียวของระบบ ────────────────────────────────────────────
+  # ★ HTTPS ไม่ใช่ของเสริมสำหรับงานนี้ — กล้องสแกน QR (getUserMedia) เบราว์เซอร์
+  #   ให้ใช้เฉพาะ secure context ถ้าเปิดผ่าน http:// หน้า /scan จะขอกล้องไม่ได้เลย
+  #   แปลว่า staff เช็คอินคนไม่ได้ทั้งงาน
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/templates/nginx.conf.template:ro
+      - ./nginx/proxy_common.conf:/etc/nginx/proxy_common.conf:ro
+      - ./nginx/proxy_headers.conf:/etc/nginx/proxy_headers.conf:ro
+      - ./nginx/security_headers.conf:/etc/nginx/security_headers.conf:ro
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot
+      - nginx_cache:/var/cache/nginx
+    environment:
+      # ★ NGINX_ENVSUBST_FILTER สำคัญมาก — จำกัดว่า envsubst แทนที่ตัวแปรชื่อไหนได้บ้าง
+      #   ถ้าไม่ใส่ มันจะกิน $host $remote_addr $request_uri ของ nginx เองไปด้วย
+      #   (ตัวแปร nginx จะกลายเป็นค่าว่างทั้งหมด = log เพี้ยน proxy พัง)
+      NGINX_ENVSUBST_FILTER: "^(API_DOMAIN|APP_DOMAIN|WEB_UPSTREAM)$$"
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+      API_DOMAIN: ${API_DOMAIN}
+      APP_DOMAIN: ${APP_DOMAIN}
+      WEB_UPSTREAM: ${WEB_UPSTREAM:-web:3000}
+    depends_on:
+      api: { condition: service_started }
+      ws: { condition: service_started }
+    restart: unless-stopped
+
+  # ต่ออายุใบรับรองอัตโนมัติ — Let's Encrypt อายุ 90 วัน เช็คทุก 12 ชม.
+  # (ตรวจบ่อยกว่าที่จำเป็นโดยตั้งใจ เผื่อ VPS ดับไปหลายวันแล้วเพิ่งกลับมา)
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+      while :; do certbot renew --webroot -w /var/www/certbot --quiet;
+      sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
+  redis_data:
+  certbot_certs:
+  certbot_www:
+  nginx_cache:

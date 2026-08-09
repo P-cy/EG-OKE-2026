@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # push ซ้อนกันบน branch เดิม → ยกเลิกอันเก่า ไม่ต้องรอคิว
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (ruff + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval db.adminCommand('ping')"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+
+    env:
+      MONGO_URI: mongodb://localhost:27017
+      # ★ ชื่อ db ต้องลงท้าย _test — conftest ใช้เป็นด่านกันเผลอรันใส่ฐานจริง
+      MONGO_DB: egoke2026_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-secret-not-used-in-production
+      QR_HMAC_KEY: ci-qr-key
+      ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check app/ scripts/ tests/
+
+      - name: Test
+        # tests/test_api_contracts.py อ่าน ../frontend/src ที่ checkout มาด้วยกัน
+        # ถ้าหาไม่เจอมันจะ skip เงียบๆ — บรรทัดล่างจึงบังคับว่าห้าม skip
+        run: pytest -q --no-header
+
+      - name: ห้ามมีเทสต์ contract ถูก skip
+        run: |
+          pytest tests/test_api_contracts.py -q --no-header -rs 2>&1 | tee /tmp/out.txt
+          if grep -qi "skipped" /tmp/out.txt; then
+            echo "::error::เทสต์ contract ถูก skip — แปลว่าหา frontend/src ไม่เจอ"
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend (typecheck + vitest + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        env:
+          NEXT_PUBLIC_API_BASE: http://localhost:8000/v1
+        run: npx next build

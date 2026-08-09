@@ -1,0 +1,235 @@
+# nginx สำหรับ production — ทางเข้าเดียวของทั้งระบบ
+#
+# ไฟล์นี้เป็น "template" ไม่ใช่ config โดยตรง
+# nginx image จะเอา ${API_DOMAIN} / ${APP_DOMAIN} / ${WEB_UPSTREAM} จาก environment
+# มาแทนตอน container start แล้วเขียนออกเป็น /etc/nginx/nginx.conf
+# (ควบคุมด้วย NGINX_ENVSUBST_FILTER ใน docker-compose.prod.yml — ห้ามลบ
+#  ไม่งั้น $host $remote_addr ของ nginx เองจะโดนแทนเป็นค่าว่างไปด้วย)
+
+worker_processes auto;
+worker_rlimit_nofile 65535;
+
+events {
+  worker_connections 8192;
+  multi_accept on;
+  use epoll;
+}
+
+http {
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
+
+  sendfile on;
+  tcp_nopush on;
+  tcp_nodelay on;
+  keepalive_timeout 65;
+  server_tokens off;
+
+  log_format json escape=json '{"time":"$time_iso8601","ip":"$remote_addr",'
+    '"method":"$request_method","uri":"$uri","status":$status,'
+    '"rt":$request_time,"cache":"$upstream_cache_status",'
+    '"rid":"$http_x_request_id","ua":"$http_user_agent"}';
+  access_log /var/log/nginx/access.log json;
+
+  gzip on;
+  gzip_types application/json text/plain text/css application/javascript;
+  gzip_min_length 1000;
+
+  # ── Real IP ────────────────────────────────────────────────────────
+  # เปิดทิ้งไว้ได้แม้ไม่ได้ใช้ Cloudflare — set_real_ip_from จำกัดว่าจะเชื่อ header
+  # จาก IP ช่วงไหนเท่านั้น ถ้าคนต่อตรงมาไม่ได้อยู่ในช่วงนี้ header ปลอมก็ไม่มีผล
+  #
+  # ★ แต่ถ้า "ใช้ Cloudflare แล้วลืมเปิดตรงนี้" จะเป็นปัญหาใหญ่:
+  #   ทุก request จะดูเหมือนมาจาก IP ของ Cloudflare ~20 ตัว → log ไร้ประโยชน์
+  #   และ rate limit ใดๆ ที่คิดตาม IP จะเหมารวมคนทั้งงานเป็นคนเดียว
+  #   รายการ IP ล่าสุด: https://www.cloudflare.com/ips/
+  set_real_ip_from 103.21.244.0/22;
+  set_real_ip_from 103.22.200.0/22;
+  set_real_ip_from 104.16.0.0/13;
+  set_real_ip_from 172.64.0.0/13;
+  set_real_ip_from 173.245.48.0/20;
+  set_real_ip_from 190.93.240.0/20;
+  set_real_ip_from 2400:cb00::/32;
+  real_ip_header CF-Connecting-IP;
+
+  # ── ★ ทำไมถึงไม่มี rate limit ต่อ IP ตรงนี้ ────────────────────────
+  #
+  # เวอร์ชันก่อนหน้ามี  limit_req_zone ... rate=100r/m  กับ  limit_conn perip 40
+  # ซึ่งบนกระดาษดูดี แต่กับงานนี้มันจะทำให้งานล่มตั้งแต่ 9 โมงเช้า:
+  #
+  #   ผู้เข้างาน ~5,000 คนต่อ wifi มหาวิทยาลัยเส้นเดียวกัน = ออกเน็ตด้วย public IP
+  #   ไม่กี่ตัว (NAT) นั่นแปลว่าในสายตา nginx คนทั้งงานคือ "IP เดียว"
+  #   → 100 request ต่อนาที สำหรับคนทั้งงานรวมกัน
+  #   → limit_conn 40 = เปิดเว็บพร้อมกันได้ 7 คน (เบราว์เซอร์เปิด ~6 connection ต่อคน)
+  #
+  # การกันซ้ำ/กันยิงรัวของจริงอยู่ที่ backend ซึ่งนับ "ต่อผู้ใช้" ไม่ใช่ต่อ IP
+  # (app/core/ratelimit.py — sliding window บน Redis, ฟังก์ชัน check_public()
+  #  ถูกเขียนมาเพื่อเลี่ยงปัญหา NAT นี้โดยเฉพาะ)
+  #
+  # ถ้าโดนยิงจริงระหว่างงานและต้องเบรกฉุกเฉิน ค่อยเปิดบล็อกนี้แล้ว nginx -s reload
+  # (ยอมรับว่าจะกระทบคนในเครือข่ายเดียวกันด้วย — เป็นการแลกที่ตั้งใจ):
+  #
+  #   limit_req_zone $binary_remote_addr zone=emergency:10m rate=3000r/s;
+  #   limit_req_status 429;
+  #   ...แล้วใส่  limit_req zone=emergency burst=1000 nodelay;  ใน location /v1/
+
+  # ── ★ Micro-cache: ตัวที่ทำให้คนหลายพัน poll พร้อมกันแล้วไม่ล่ม ────
+  proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=live:20m
+                   max_size=200m inactive=60s use_temp_path=off;
+
+  upstream api { server api:8000 max_fails=3 fail_timeout=10s; keepalive 64; }
+  upstream ws  { server ws:8001; keepalive 32; }
+  upstream web { server ${WEB_UPSTREAM}; keepalive 32; }
+
+  # ── HTTP → HTTPS (เว้น path ที่ certbot ใช้ต่ออายุใบรับรอง) ─────────
+  server {
+    listen 80;
+    listen [::]:80;
+    server_name _;
+    location /.well-known/acme-challenge/ { root /var/www/certbot; }
+    location / { return 301 https://$host$request_uri; }
+  }
+
+  # ── API ────────────────────────────────────────────────────────────
+  server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${API_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    include /etc/nginx/security_headers.conf;
+
+    client_max_body_size 5m;
+    client_body_timeout 10s;
+
+    # ── SSE: push แจ้งเตือนเข้ามือถือตอนถูกเช็คอิน ────────────────────
+    # ★ ต้องมาก่อน location /v1/me/ ไม่งั้นโดนกลืน
+    # ★ proxy_buffering off คือหัวใจ — ถ้าเปิด (ค่า default) nginx จะกอง chunk ไว้
+    #   รอให้ครบ buffer ก่อนค่อยส่ง = modal เด้งช้าเป็นนาที หรือไม่เด้งเลย
+    # ★ proxy_read_timeout ต้องยาว — ค่า default 30s (ใน proxy_common.conf)
+    #   จะตัด connection ทิ้งทุก 30 วิ กลายเป็น reconnect loop ของคนทั้งงาน
+    location = /v1/me/stream {
+      proxy_pass http://api;
+      include /etc/nginx/proxy_headers.conf;
+      proxy_buffering off;
+      proxy_cache off;
+      gzip off;
+      chunked_transfer_encoding off;
+      proxy_read_timeout 3600s;
+      proxy_send_timeout 3600s;
+    }
+
+    # ── ห้าม cache endpoint ที่มีข้อมูลส่วนตัว ───────────────────────
+    location /v1/me/ {
+      proxy_no_cache 1;
+      proxy_cache_bypass 1;
+      add_header Cache-Control "private, no-store" always;
+      include /etc/nginx/security_headers.conf;   # ★ ต้องซ้ำ ดูเหตุผลในไฟล์
+      proxy_pass http://api;
+      include /etc/nginx/proxy_common.conf;
+    }
+
+    # ── ไฟล์ CSV ที่ admin กดโหลด — ใหญ่และช้ากว่า request ปกติ ───────
+    # 5,000 แถวสตรีมออกมาทีละก้อน ใช้เวลาเกิน 30s ได้ง่ายถ้า DB ช้า
+    location /v1/exports/ {
+      proxy_pass http://api;
+      include /etc/nginx/proxy_headers.conf;
+      proxy_connect_timeout 3s;
+      proxy_read_timeout 300s;
+      proxy_send_timeout 300s;
+      proxy_buffering off;
+    }
+
+    # ── WebSocket (จอแสดงผลหน้างาน) ─────────────────────────────────
+    location /v1/live/ws {
+      proxy_pass http://ws;
+      proxy_http_version 1.1;
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+      proxy_set_header Host $host;
+      proxy_read_timeout 300s;    # ★ default 60s จะตัด WS ทิ้ง
+      proxy_send_timeout 300s;
+    }
+
+    # ── /live/* : cache 1 วิ ─────────────────────────────────────────
+    # จอ + มือถือหลายพันเครื่อง poll เข้ามา แต่ upstream เห็นแค่ ~1 rps
+    # เพราะ cache + proxy_cache_lock (คนแรกที่ cache หมดอายุไปดึงคนเดียว
+    # ที่เหลือรอผลของคนนั้น ไม่ใช่แห่กันทะลุไป backend พร้อมกัน)
+    location /v1/live/ {
+      proxy_cache            live;
+      proxy_cache_valid 200  1s;
+      proxy_cache_valid 404  5s;
+      proxy_cache_lock       on;
+      proxy_cache_lock_timeout 2s;
+      proxy_cache_use_stale  updating error timeout http_500 http_502 http_503 http_504;
+      proxy_cache_background_update on;
+      proxy_cache_key        "$scheme$request_method$host$request_uri";
+      add_header X-Cache-Status $upstream_cache_status always;
+      include /etc/nginx/security_headers.conf;   # ★ ต้องซ้ำ ดูเหตุผลในไฟล์
+      proxy_pass http://api;
+      include /etc/nginx/proxy_common.conf;
+    }
+
+    location /v1/ {
+      proxy_pass http://api;
+      include /etc/nginx/proxy_common.conf;
+    }
+
+    # metrics/readyz เข้าจากในเครือข่ายเท่านั้น
+    location ~ ^/(metrics|readyz)$ {
+      allow 127.0.0.1;
+      allow 10.0.0.0/8;
+      allow 172.16.0.0/12;    # ช่วง IP ของ docker bridge network
+      deny all;
+      proxy_pass http://api;
+    }
+
+    location = /healthz { access_log off; proxy_pass http://api; }
+  }
+
+  # ── หน้าเว็บ (Next.js) ──────────────────────────────────────────────
+  # ใช้เมื่อรัน frontend บน VPS เครื่องเดียวกัน (docker compose --profile web)
+  # ถ้าเอา frontend ไปไว้ Vercel/Netlify บล็อกนี้จะไม่มีใครเรียก ปล่อยไว้ได้
+  server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${APP_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    include /etc/nginx/security_headers.conf;
+
+    # ★ Permissions-Policy ต้องอยู่ที่โดเมน "หน้าเว็บ" ไม่ใช่โดเมน API —
+    #   กล้องถูกเรียกจากหน้า /scan ซึ่งเสิร์ฟจากที่นี่
+    #   ใส่ผิดที่ = staff กดเปิดกล้องแล้วเบราว์เซอร์ปฏิเสธ โดยไม่บอกว่าเพราะอะไร
+    add_header Permissions-Policy "camera=(self), microphone=(), geolocation=()" always;
+
+    client_max_body_size 5m;
+
+    # ไฟล์ static ที่ Next.js ใส่ hash ในชื่อไว้แล้ว — cache ยาวได้ปลอดภัย
+    location /_next/static/ {
+      proxy_pass http://web;
+      include /etc/nginx/proxy_common.conf;
+      add_header Cache-Control "public, max-age=31536000, immutable" always;
+      include /etc/nginx/security_headers.conf;   # ★ ต้องซ้ำ ดูเหตุผลในไฟล์
+    }
+
+    location / {
+      proxy_pass http://web;
+      include /etc/nginx/proxy_common.conf;
+    }
+  }
+}

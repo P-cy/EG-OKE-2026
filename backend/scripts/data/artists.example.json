@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "ไฟล์ตัวอย่าง — ก็อปไปเป็น artists.json แล้วแก้ข้อมูลจริง",
+    "แล้วรัน: docker compose exec api python -m scripts.import_artists scripts/data/artists.json",
+    "",
+    "artists.slug        : รหัสสั้น a-z 0-9 - ห้ามซ้ำ ใช้อ้างอิงใน rounds.candidates",
+    "artists.image_url   : ลิงก์รูป (จะว่างก็ได้ หน้าเว็บจะไม่แสดงรูป)",
+    "rounds.status       : ตั้ง closed ไว้ก่อน แล้วกดเปิดเองที่ /admin/rounds ตอนขึ้นเวที",
+    "rounds.opens_at/closes_at : null = ไม่จำกัดเวลา คุมด้วยปุ่มเปิด/ปิดอย่างเดียว (แนะนำ)"
+  ],
+  "artists": [
+    { "slug": "band-a", "name": "วง A", "image_url": null, "sort_order": 1 },
+    { "slug": "band-b", "name": "วง B", "image_url": null, "sort_order": 2 },
+    { "slug": "band-c", "name": "วง C", "image_url": null, "sort_order": 3 },
+    { "slug": "band-d", "name": "วง D", "image_url": null, "sort_order": 4 }
+  ],
+  "rounds": [
+    {
+      "round_key": "d1-main",
+      "title": "โหวตศิลปินหลัก วันที่ 1",
+      "candidates": ["band-a", "band-b", "band-c", "band-d"],
+      "status": "closed",
+      "max_votes_per_user": 1,
+      "opens_at": null,
+      "closes_at": null,
+      "results_public": false
+    }
+  ]
+}

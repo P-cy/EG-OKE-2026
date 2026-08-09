@@ -1,0 +1,38 @@
+# ── ความลับ — ห้ามขึ้น git เด็ดขาด ─────────────────────────────────────
+# ★ ก่อนมีไฟล์นี้ backend/.env (มี GOOGLE_CLIENT_SECRET, JWT_SECRET,
+#   QR_SIGNING_KEY, DISPLAY_TOKEN) ไม่ถูก ignore เลย — `git add backend/`
+#   ครั้งเดียวคือความลับทั้งชุดขึ้น GitHub
+#   ถ้าเผลอ commit ไปแล้ว การลบไฟล์ทีหลังไม่พอ ต้องถือว่าคีย์รั่วแล้ว
+#   ให้สร้างใหม่ทุกตัว (deploy-init.sh) + revoke client secret ใน Google Console
+.env
+.env.*
+!.env.example
+!.env.production.example
+*.pem
+*.key
+backend/secrets/
+secrets/
+# ไฟล์สำรองข้อมูลมีข้อมูลส่วนบุคคลของผู้เข้างานทุกคน
+backups/
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Node / Next.js ─────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+
+# ── เครื่องมือ / ระบบปฏิบัติการ ────────────────────────────────────────
+.DS_Store
+*.log
+.idea/
+.vscode/

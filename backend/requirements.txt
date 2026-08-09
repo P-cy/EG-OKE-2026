@@ -1,0 +1,26 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+gunicorn==23.0.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+email-validator==2.2.0
+motor==3.6.0
+pymongo==4.9.2
+redis==5.2.1
+httpx==0.28.1
+python-jose[cryptography]==3.3.0
+pyjwt[crypto]==2.10.1
+python-multipart==0.0.20
+orjson==3.10.13
+structlog==24.4.0
+prometheus-client==0.21.1
+python-ulid==3.0.0
+tenacity==9.0.0
+
+# dev / test
+pytest==8.3.4
+pytest-asyncio==0.25.0
+# ★ ต้องเป็น fakeredis[lua] — ไม่งั้น EVALSHA ใช้ไม่ได้ แล้ว test ของ vote.lua/ratelimit.lua
+#   (ตัวที่สำคัญที่สุดในชุด) จะ fail ทุกครั้งด้วย "unknown command `evalsha`"
+fakeredis[lua]==2.26.2
+ruff==0.8.4
