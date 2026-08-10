@@ -60,8 +60,9 @@
 | [15-frontend-handoff.md](15-frontend-handoff.md) | **ส่งต่อ frontend** — ทุกหน้า/nav/component/lib + วิธีรัน/build/docker/env |
 | [16-features.md](16-features.md) | **รายละเอียดแต่ละฟีเจอร์** — flow + config + ไฟล์ (auth, check-in, SSE/AT, quests, vote, IG, wheel, coins, export, audit, config) |
 | [17-api-endpoints.md](17-api-endpoints.md) | **endpoint ทั้งหมด 58 ตัว** — แยกตามกลุ่ม + auth + body/response |
+| [18-backend-handoff.md](18-backend-handoff.md) | **ส่งต่อ backend** — services/processes + รัน dev/build+docker production + env + scripts + ops |
 
-> เริ่มแก้โค้ดฝั่งเว็บ → อ่าน [15](15-frontend-handoff.md) ก่อน แล้วเข้า [16](16-features.md) (ฟีเจอร์) + [17](17-api-endpoints.md) (API)
+> เริ่มแก้โค้ด → อ่าน [15](15-frontend-handoff.md) (เว็บ) หรือ [18](18-backend-handoff.md) (backend) ก่อน แล้วเข้า [16](16-features.md) (ฟีเจอร์) + [17](17-api-endpoints.md) (API)
 
 โค้ดโครงร่างอยู่ที่ [`backend/`](../backend/) — รันได้จริงด้วย `docker compose up`
 
