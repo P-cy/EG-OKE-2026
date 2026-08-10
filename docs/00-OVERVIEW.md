@@ -32,17 +32,36 @@
 
 ## เอกสารในชุดนี้
 
+### ออกแบบ/สถาปัตยกรรม (อ่านก่อน)
 | ไฟล์ | เนื้อหา |
 |---|---|
 | [01-architecture.md](01-architecture.md) | สถาปัตยกรรม, การไหลของข้อมูล, กลยุทธ์กัน burst, HA |
 | [02-database-schema.md](02-database-schema.md) | MongoDB collections ทุกตัว + index + เหตุผล |
 | [03-api-spec.md](03-api-spec.md) | REST endpoints ทั้งหมด + error model + rate limit |
 | [04-realtime.md](04-realtime.md) | WebSocket / SSE / snapshot broadcaster / วงล้อ provably-fair |
-| [05-infrastructure.md](05-infrastructure.md) | Contabo sizing, Docker Compose, Nginx, backup, failover runbook |
+| [05-infrastructure.md](05-infrastructure.md) | VPS sizing, Docker Compose, Nginx, backup, failover runbook |
 | [06-security.md](06-security.md) | Threat model, anti-cheat, QR anti-sharing, rate limiting |
-| [07-cost.md](07-cost.md) | ค่าใช้จ่ายละเอียด 3 ทางเลือก + ตัวเลือกลดต้นทุน |
-| [08-workplan.md](08-workplan.md) | แผนงานแยก module, timeline, ใครทำอะไร, definition of done |
+| [07-cost.md](07-cost.md) | ค่าใช้จ่ายละเอียด + ตัวเลือกลดต้นทุน |
+| [08-workplan.md](08-workplan.md) | แผนงานแยก module, timeline, definition of done |
+
+### คู่มือใช้งาน/ส่งต่อ (อ่านตอนทำ)
+| ไฟล์ | เนื้อหา |
+|---|---|
 | [09-frontend-plan.md](09-frontend-plan.md) | โครง frontend คร่าวๆ + route map + state strategy |
+| [10-ig-wall-feature.md](10-ig-wall-feature.md) | รายละเอียดระบบ IG wall |
+| [11-local-testing-guide.md](11-local-testing-guide.md) | ทดสอบบนเครื่อง + สร้าง Google OAuth credential |
+| [12-checkin-system.md](12-checkin-system.md) | ระบบ QR check-in |
+| [13-testing-and-load.md](13-testing-and-load.md) | load test |
+| [14-deploy-vps.md](14-deploy-vps.md) | deploy production บน VPS |
+
+### ★ Reference ล่าสุด (หลัง implement)
+| ไฟล์ | เนื้อหา |
+|---|---|
+| [15-frontend-handoff.md](15-frontend-handoff.md) | **ส่งต่อ frontend** — ทุกหน้า/nav/component/lib + วิธีรัน/build/docker/env |
+| [16-features.md](16-features.md) | **รายละเอียดแต่ละฟีเจอร์** — flow + config + ไฟล์ (auth, check-in, SSE/AT, quests, vote, IG, wheel, coins, export, audit, config) |
+| [17-api-endpoints.md](17-api-endpoints.md) | **endpoint ทั้งหมด 58 ตัว** — แยกตามกลุ่ม + auth + body/response |
+
+> เริ่มแก้โค้ดฝั่งเว็บ → อ่าน [15](15-frontend-handoff.md) ก่อน แล้วเข้า [16](16-features.md) (ฟีเจอร์) + [17](17-api-endpoints.md) (API)
 
 โค้ดโครงร่างอยู่ที่ [`backend/`](../backend/) — รันได้จริงด้วย `docker compose up`
 
